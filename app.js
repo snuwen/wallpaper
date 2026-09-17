@@ -13,6 +13,8 @@
   const customHeightInput = document.getElementById("customHeight");
   const exportBtn = document.getElementById("exportBtn");
   const exportStatus = document.getElementById("exportStatus");
+  const exportHtmlBtn = document.getElementById("exportHtmlBtn");
+  const exportHtmlStatus = document.getElementById("exportHtmlStatus");
   const togglePlayBtn = document.getElementById("togglePlay");
   const darkenTopInput = document.getElementById("darkenTop");
   const supersampleSelect = document.getElementById("supersample");
@@ -211,6 +213,120 @@
   }
 
   exportBtn.addEventListener("click", exportPNG);
+
+  // A literal "</script" anywhere in the embedded source would close the
+  // <script> tag early when the browser's HTML parser scans for it - it
+  // doesn't care that the text is inside a JS string. None of our own
+  // source contains that sequence, but this is cheap insurance.
+  function escapeScriptClose(str) {
+    return str.replace(/<\/script/gi, "<\\/script");
+  }
+
+  function buildStandaloneHtml(engineSource, config) {
+    const configJson = escapeScriptClose(JSON.stringify(config));
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Animated Gradient Wallpaper</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="gradient"></canvas>
+<script>
+${escapeScriptClose(engineSource)}
+</script>
+<script>
+(function () {
+  var config = ${configJson};
+  var canvas = document.getElementById("gradient");
+  // Denser than the live preview (matches export quality) since this
+  // renders continuously at whatever size OBS (or the browser) gives it,
+  // with no further supersampling pass to clean up mesh facets.
+  var MESH_QUALITY = 1.6;
+  var renderer = null;
+
+  // Real pixel resolution follows the actual window/OBS-source size, capped
+  // devicePixelRatio like the live preview; config.logicalWidth/Height (the
+  // size chosen in the studio) stays fixed so the waves keep the same
+  // scale/shape regardless of what size this ends up displayed at.
+  function pixelSize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    return {
+      w: Math.max(2, Math.round(window.innerWidth * dpr)),
+      h: Math.max(2, Math.round(window.innerHeight * dpr)),
+    };
+  }
+
+  function start() {
+    var size = pixelSize();
+    renderer = new GradientRenderer(canvas, {
+      colors: config.colors,
+      darkenTop: config.darkenTop,
+      seed: config.seed,
+    });
+    renderer.init(size.w, size.h, MESH_QUALITY, config.logicalWidth, config.logicalHeight);
+    renderer.play();
+  }
+
+  var resizeTimeout;
+  window.addEventListener("resize", function () {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(function () {
+      if (!renderer) return;
+      var size = pixelSize();
+      renderer.setSize(size.w, size.h, MESH_QUALITY, config.logicalWidth, config.logicalHeight);
+    }, 150);
+  });
+
+  start();
+})();
+</script>
+</body>
+</html>
+`;
+  }
+
+  async function exportAnimatedHTML() {
+    exportHtmlBtn.disabled = true;
+    exportHtmlStatus.textContent = "Building file...";
+    try {
+      const engineScriptEl = document.querySelector('script[src*="gradient-engine.js"]');
+      const engineUrl = engineScriptEl ? engineScriptEl.src : "gradient-engine.js";
+      const response = await fetch(engineUrl);
+      if (!response.ok) throw new Error(`Could not fetch ${engineUrl} (${response.status})`);
+      const engineSource = await response.text();
+
+      const html = buildStandaloneHtml(engineSource, {
+        colors: state.colors,
+        darkenTop: state.darkenTop,
+        seed: state.seed,
+        logicalWidth: state.width,
+        logicalHeight: state.height,
+      });
+
+      const blob = new Blob([html], { type: "text/html" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `gradient-wallpaper-animated-${state.width}x${state.height}.html`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      exportHtmlStatus.textContent = "Done: animated .html file downloaded - add it as a Browser Source in OBS.";
+    } catch (err) {
+      console.error(err);
+      exportHtmlStatus.textContent = "Couldn't build the file. If you opened this page directly from disk (file://), serve it over http(s) instead and try again.";
+    } finally {
+      exportHtmlBtn.disabled = false;
+    }
+  }
+
+  exportHtmlBtn.addEventListener("click", exportAnimatedHTML);
 
   setPreset("phone");
 })();

@@ -7,9 +7,12 @@ as PNGs, extracted from the WebGL gradient background used in TimerV1.
 
 - Same WebGL mesh-gradient technique as the TimerV1 stream widget (4
   configurable colors, animated noise).
-- Layout presets: phone (9:16, 1080×1920), desktop (16:9, 1920×1080),
-  desktop 4K (3840×2160), or a fully custom width/height.
+- Layout presets: phone (9:16, 1080×1920 or 2160×3840), desktop (16:9,
+  1920×1080 or 3840×2160), or a fully custom width/height.
 - High-quality PNG export, independent from screen resolution.
+- Animated HTML export: a single self-contained `.html` file with the
+  current colors/pattern baked in, for use as an OBS (or any streaming
+  software) Browser Source live animated background.
 
 ## Why the quality is better than the original widget
 
@@ -32,9 +35,21 @@ This tool fixes both:
 
 ## Usage
 
-Just open `index.html` in a browser (or serve the folder statically — no
-build step, no dependencies). Pick a layout, tweak colors, hit **PNG olarak
-dışa aktar**.
+Serve the folder statically (e.g. `python3 -m http.server`, or GitHub
+Pages — no build step, no dependencies) and open `index.html`. A plain
+`file://` open works for viewing/PNG export, but the animated-HTML export
+button needs to `fetch()` `gradient-engine.js`, which browsers block for
+`file://` pages — serve it over http(s) for that button to work.
+
+Pick a layout, tweak colors, then either:
+
+- **Export as PNG** — a static high-resolution snapshot of the current
+  frame.
+- **Export as animated HTML** — downloads a single `.html` file with the
+  animation baked in (colors, seed, chosen size). Open it directly, or add
+  it as an OBS **Browser Source** (Local File) for a live animated
+  background — it resizes itself to fill whatever dimensions the source
+  is given, while keeping the same wave scale/shape you designed.
 
 ## Files
 

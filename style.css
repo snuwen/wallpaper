@@ -206,6 +206,15 @@ input[type="number"], select {
 .export-btn:hover { background: var(--accent-hover); }
 .export-btn:disabled { opacity: 0.6; cursor: default; }
 
+.export-btn.secondary {
+  background: #1c1c26;
+  border: 1px solid var(--border);
+  color: var(--text);
+  margin-top: 18px;
+}
+
+.export-btn.secondary:hover { background: #24242f; border-color: var(--accent); }
+
 .stage {
   flex: 1;
   display: flex;
