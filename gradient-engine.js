@@ -26,6 +26,16 @@
 //      preview vs. a (supersampled) export, because the noise function is
 //      sampled at real pixel coordinates - preview and export must agree
 //      on a shared logical size for the pattern to match.
+//   5. That logical size is normalized by its long edge before driving
+//      the noise frequency (see _noiseResolutionFor), so picking a 4K
+//      preset over its 1x version (same aspect ratio) renders the SAME
+//      size waves at higher fidelity, instead of many smaller waves.
+//   6. Mesh density is keyed to that same normalized logical size, not the
+//      real/supersampled framebuffer size (see _meshSegments) - tying it
+//      to the supersampled buffer used to blow past the mesh's vertex cap
+//      and get clamped back to a coarser-than-intended mesh, which showed
+//      up as blurry, over-smoothed edges in exports (worse at higher
+//      supersampling, the opposite of the intended effect).
 
 function normalizeColor(hex) {
   const num = parseInt(hex.replace("#", ""), 16);
@@ -468,13 +478,61 @@ class GradientRenderer {
     return Math.max(2000, height);
   }
 
+  // Noise coordinates are computed as (noiseResolution * uvNorm * freq), so
+  // the wave pattern's on-screen SIZE scales with noiseResolution's
+  // magnitude: doubling it (e.g. picking a 4K preset over its 1x version,
+  // same aspect ratio) doubles the number of wave cycles that fit across
+  // the canvas, i.e. the waves shrink instead of just getting sharper.
+  // Normalizing by the long edge keeps the wave pattern's size tied only
+  // to aspect ratio, not to the chosen resolution - a phone-9:16 export
+  // looks like a higher-fidelity render of the same waves whether it's
+  // 1080x1920 or 2160x3840.
+  static _REFERENCE_LONG_EDGE = 1920;
+  static _noiseResolutionFor(width, height) {
+    const scale = GradientRenderer._REFERENCE_LONG_EDGE / Math.max(width, height);
+    return [width * scale, height * scale];
+  }
+
+  // Mesh density (segment count) is also keyed to this same logical size,
+  // not the real/supersampled framebuffer pixel size. It only needs to be
+  // dense enough to avoid visible triangle-facet banding at the FINAL
+  // output resolution; tying it to the (often much larger) supersampled
+  // buffer instead used to blow past the mesh's vertex cap and get
+  // clamped back down to a coarser-than-intended mesh, which showed up as
+  // blurry/over-smoothed edges in exports - worse the higher the
+  // supersampling. Since antialiasing quality now comes from rendering at
+  // more raw pixels per (fixed-density) triangle and downsampling, more
+  // supersampling no longer fights the mesh density for the same budget.
+  static _meshSegments(logicalWidth, logicalHeight, meshQuality) {
+    return [
+      Math.max(1, Math.round(logicalWidth * 0.06 * meshQuality)),
+      Math.max(1, Math.round(logicalHeight * 0.16 * meshQuality)),
+    ];
+  }
+
+  // The vertex-displacement amplitude (this.amp, default 320) is added
+  // directly to vertex positions in world-space units, and the mesh's
+  // world-space size is set to the REAL (raster) width/height - which
+  // varies a lot: a small downscaled preview canvas, a 1x export, or a
+  // 4x-supersampled export buffer for the very same wallpaper. A fixed
+  // amplitude is a shrinking fraction of a taller real canvas, so the
+  // mesh's actual waviness flattens out as supersampling or logical
+  // resolution increases, even after the noise pattern itself was fixed
+  // to stay resolution-independent. Scaling it by the real height keeps
+  // the same proportion (calibrated against the original widget's fixed
+  // 600px-tall canvas) regardless of raster resolution.
+  static _AMP_REFERENCE_HEIGHT = 600;
+  static _scaledAmp(amp, realHeight) {
+    return amp * (realHeight / GradientRenderer._AMP_REFERENCE_HEIGHT);
+  }
+
   _buildMesh(width, height, meshQuality, logicalWidth = width, logicalHeight = height) {
     const sectionColors = this.colors.map(normalizeColor);
     const uniforms = {
       u_time: new this.minigl.Uniform({ value: this.time }),
       u_shadow_power: new this.minigl.Uniform({ value: logicalWidth < 600 ? 5 : 6 }),
       u_darken_top: new this.minigl.Uniform({ value: this.darkenTop ? 1 : 0 }),
-      u_noiseResolution: new this.minigl.Uniform({ value: [logicalWidth, logicalHeight], type: "vec2" }),
+      u_noiseResolution: new this.minigl.Uniform({ value: GradientRenderer._noiseResolutionFor(logicalWidth, logicalHeight), type: "vec2" }),
       u_active_colors: new this.minigl.Uniform({ value: [1, 1, 1, 1], type: "vec4" }),
       u_global: new this.minigl.Uniform({
         value: {
@@ -489,7 +547,7 @@ class GradientRenderer {
           offsetTop: new this.minigl.Uniform({ value: -0.5 }),
           offsetBottom: new this.minigl.Uniform({ value: -0.5 }),
           noiseFreq: new this.minigl.Uniform({ value: [3, 4], type: "vec2" }),
-          noiseAmp: new this.minigl.Uniform({ value: this.amp }),
+          noiseAmp: new this.minigl.Uniform({ value: GradientRenderer._scaledAmp(this.amp, height) }),
           noiseSpeed: new this.minigl.Uniform({ value: 10 }),
           noiseFlow: new this.minigl.Uniform({ value: 3 }),
           noiseSeed: new this.minigl.Uniform({ value: this.seed }),
@@ -519,10 +577,10 @@ class GradientRenderer {
     this.material = new this.minigl.Material(vertexShader, SHADERS.fragment, uniforms);
 
     // Mesh density: baseline matches the original widget's feel at 1x, but
-    // is driven by real pixel dimensions and a quality multiplier so large
-    // exports get a proportionally denser mesh instead of visible facets.
-    const xSeg = Math.max(1, Math.round(width * 0.06 * meshQuality));
-    const ySeg = Math.max(1, Math.round(height * 0.16 * meshQuality));
+    // is driven by the logical (not raster) dimensions and a quality
+    // multiplier so larger presets get a proportionally denser mesh
+    // instead of visible facets - see _meshSegments.
+    const [xSeg, ySeg] = GradientRenderer._meshSegments(logicalWidth, logicalHeight, meshQuality);
     this.geometry = new this.minigl.PlaneGeometry(width, height, xSeg, ySeg);
     this.mesh = new this.minigl.Mesh(this.geometry, this.material);
   }
@@ -531,12 +589,12 @@ class GradientRenderer {
     this.minigl.setSize(width, height);
     const depth = GradientRenderer._clipDepth(height);
     this.minigl.setOrthographicCamera(0, 0, 0, -depth, depth);
-    const xSeg = Math.max(1, Math.round(width * 0.06 * meshQuality));
-    const ySeg = Math.max(1, Math.round(height * 0.16 * meshQuality));
+    const [xSeg, ySeg] = GradientRenderer._meshSegments(logicalWidth, logicalHeight, meshQuality);
     this.mesh.geometry.setTopology(xSeg, ySeg);
     this.mesh.geometry.setSize(width, height);
     this.uniforms.u_shadow_power.value = logicalWidth < 600 ? 5 : 6;
-    this.uniforms.u_noiseResolution.value = [logicalWidth, logicalHeight];
+    this.uniforms.u_noiseResolution.value = GradientRenderer._noiseResolutionFor(logicalWidth, logicalHeight);
+    this.uniforms.u_vertDeform.value.noiseAmp.value = GradientRenderer._scaledAmp(this.amp, height);
   }
 
   setColors(hexColors) {
