@@ -35,11 +35,9 @@ This tool fixes both:
 
 ## Usage
 
-Serve the folder statically (e.g. `python3 -m http.server`, or GitHub
-Pages — no build step, no dependencies) and open `index.html`. A plain
-`file://` open works for viewing/PNG export, but the animated-HTML export
-button needs to `fetch()` `gradient-engine.js`, which browsers block for
-`file://` pages — serve it over http(s) for that button to work.
+Just open `index.html` — double-click it, or serve the folder statically
+(e.g. `python3 -m http.server`, or GitHub Pages). No build step or
+dependencies needed to use it.
 
 Pick a layout, tweak colors, then either:
 
@@ -55,8 +53,16 @@ Pick a layout, tweak colors, then either:
 
 - `gradient-engine.js` — WebGL gradient renderer (MiniGl + mesh-gradient
   shaders), with resolution/mesh-density controls added for export quality.
+  This is the file to edit.
 - `app.js` — UI wiring: presets, custom size, colors, export.
-- `index.html`, `style.css` — the interface.
+- `index.template.html`, `style.css` — the interface source.
+- `index.html` — **generated** from `index.template.html` by `build.js`,
+  with `gradient-engine.js`'s source embedded inline (so both the page and
+  its animated-HTML export work when opened straight from disk, with no
+  server — a `fetch()` of a local file would otherwise be blocked by the
+  browser). After editing `gradient-engine.js` or `index.template.html`,
+  run `node build.js` to regenerate it. Don't hand-edit `index.html`.
+- `build.js` — the (dependency-free) script that generates `index.html`.
 
 ## Credits
 

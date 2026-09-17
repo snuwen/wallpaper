@@ -294,11 +294,16 @@ ${escapeScriptClose(engineSource)}
     exportHtmlBtn.disabled = true;
     exportHtmlStatus.textContent = "Building file...";
     try {
-      const engineScriptEl = document.querySelector('script[src*="gradient-engine.js"]');
-      const engineUrl = engineScriptEl ? engineScriptEl.src : "gradient-engine.js";
-      const response = await fetch(engineUrl);
-      if (!response.ok) throw new Error(`Could not fetch ${engineUrl} (${response.status})`);
-      const engineSource = await response.text();
+      // Read the engine's source from the inline <script type="text/plain">
+      // block index.html embeds it in (see index.template.html) instead of
+      // fetch()-ing gradient-engine.js: fetch of a local file is blocked by
+      // the browser when this page itself was just opened from disk
+      // (file://), which is exactly how most people will open this tool.
+      const engineSourceEl = document.getElementById("engineSource");
+      if (!engineSourceEl || !engineSourceEl.textContent.trim()) {
+        throw new Error("Could not find the embedded engine source.");
+      }
+      const engineSource = engineSourceEl.textContent;
 
       const html = buildStandaloneHtml(engineSource, {
         colors: state.colors,
@@ -320,7 +325,7 @@ ${escapeScriptClose(engineSource)}
       exportHtmlStatus.textContent = "Done: animated .html file downloaded - add it as a Browser Source in OBS.";
     } catch (err) {
       console.error(err);
-      exportHtmlStatus.textContent = "Couldn't build the file. If you opened this page directly from disk (file://), serve it over http(s) instead and try again.";
+      exportHtmlStatus.textContent = "Something went wrong while building the file. See the browser console for details.";
     } finally {
       exportHtmlBtn.disabled = false;
     }

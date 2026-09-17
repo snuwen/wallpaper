@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gradient Wallpaper Studio</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <h1>Gradient Wallpaper Studio</h1>
+      <p class="subtitle">Turn the animated gradient background into a high-resolution PNG wallpaper.</p>
+
+      <section class="group">
+        <h2>Size</h2>
+        <div class="preset-grid">
+          <button class="preset-btn active" data-preset="phone">
+            <span class="preset-icon phone-icon"></span>
+            <span>Phone<br /><small>9:16 · 1080×1920</small></span>
+          </button>
+          <button class="preset-btn" data-preset="phone4k">
+            <span class="preset-icon phone-icon"></span>
+            <span>Phone 4K<br /><small>9:16 · 2160×3840</small></span>
+          </button>
+          <button class="preset-btn" data-preset="desktop">
+            <span class="preset-icon desktop-icon"></span>
+            <span>Desktop<br /><small>16:9 · 1920×1080</small></span>
+          </button>
+          <button class="preset-btn" data-preset="desktop4k">
+            <span class="preset-icon desktop-icon"></span>
+            <span>Desktop 4K<br /><small>16:9 · 3840×2160</small></span>
+          </button>
+          <button class="preset-btn" data-preset="custom">
+            <span class="preset-icon custom-icon"></span>
+            <span>Custom<br /><small>your own size</small></span>
+          </button>
+        </div>
+
+        <div class="custom-size" id="customSizeRow" hidden>
+          <label>Width<input type="number" id="customWidth" min="16" max="8000" value="1080" /></label>
+          <label>Height<input type="number" id="customHeight" min="16" max="8000" value="1920" /></label>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Colors</h2>
+        <div class="color-row">
+          <label class="color-swatch"><input type="color" id="color1" value="#5f0cd6" /><span>1</span></label>
+          <label class="color-swatch"><input type="color" id="color2" value="#2b6bff" /><span>2</span></label>
+          <label class="color-swatch"><input type="color" id="color3" value="#ff3d81" /><span>3</span></label>
+          <label class="color-swatch"><input type="color" id="color4" value="#ff8a3d" /><span>4</span></label>
+        </div>
+        <button id="randomizeColors" class="text-btn">Randomize colors</button>
+      </section>
+
+      <section class="group">
+        <h2>Quality</h2>
+        <label class="field">
+          Export supersampling
+          <select id="supersample">
+            <option value="2">2× (fast)</option>
+            <option value="3" selected>3× (recommended)</option>
+            <option value="4">4× (highest quality)</option>
+          </select>
+        </label>
+        <p class="hint">Higher values further reduce jagged edges at sharp color transitions, at the cost of export time.</p>
+      </section>
+
+      <section class="group">
+        <h2>Motion</h2>
+        <label class="field checkbox"><input type="checkbox" id="darkenTop" /> Darken top</label>
+        <div class="playback-row">
+          <button id="togglePlay" class="text-btn">Pause</button>
+          <button id="reshuffle" class="text-btn">New pattern</button>
+        </div>
+      </section>
+
+      <button id="exportBtn" class="export-btn">Export as PNG</button>
+      <p class="hint" id="exportStatus"></p>
+
+      <button id="exportHtmlBtn" class="export-btn secondary">Export as animated HTML</button>
+      <p class="hint">A single self-contained .html file with this animation baked in - add it as a Browser Source in OBS (or any streaming tool) for a live animated background.</p>
+      <p class="hint" id="exportHtmlStatus"></p>
+    </aside>
+
+    <main class="stage">
+      <div class="canvas-frame" id="canvasFrame">
+        <canvas id="preview"></canvas>
+      </div>
+      <p class="dims" id="dimsLabel"></p>
+    </main>
+  </div>
+
+  <!--
+    The engine is embedded inline (not loaded via <script src>) so both the
+    Studio itself and its "Export as animated HTML" button work when this
+    page is opened directly from disk (file://) - browsers block fetch()
+    of local files there, which an external-script-only setup would need
+    for the export feature to read the engine's source text.
+    The engineSource block below is generated from gradient-engine.js by
+    build.js - edit gradient-engine.js (or the rest of this file) then run
+    `node build.js` to regenerate index.html. Do not hand-edit index.html
+    directly; it's a build output and gets overwritten.
+  -->
+  <script type="text/plain" id="engineSource">{{ENGINE_SOURCE}}</script>
+  <script>new Function(document.getElementById("engineSource").textContent)();</script>
+  <script src="app.js"></script>
+</body>
+</html>
