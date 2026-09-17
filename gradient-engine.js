@@ -2,7 +2,7 @@
 // Adapted from the WebGL gradient renderer used in TimerV1 (a MiniGl-based
 // implementation of Stripe's open-source gradient mesh technique).
 //
-// Two changes from the original fix the quality/aliasing problems the
+// Changes from the original fix the quality/aliasing problems the
 // standalone widget needs to avoid:
 //   1. The canvas backing-store resolution is always driven explicitly by
 //      the caller (target CSS size * devicePixelRatio), never by
@@ -16,6 +16,16 @@
 //      mesh shows visible triangle facets/banding in sharp gradient
 //      transitions. A denser mesh removes the faceting; export uses an
 //      even denser mesh plus supersampling for the cleanest result.
+//   3. The orthographic camera's clip depth scales with render height
+//      (see _clipDepth) instead of a fixed +/-2000, so tall/supersampled
+//      renders don't get their top/bottom silently clipped by the GPU.
+//   4. The noise pattern's frequency is driven by a separate "logical
+//      size" (see u_noiseResolution / init()'s logicalWidth/logicalHeight
+//      params), not the actual framebuffer pixel size. Without this, the
+//      same wallpaper looked completely different in the (downscaled)
+//      preview vs. a (supersampled) export, because the noise function is
+//      sampled at real pixel coordinates - preview and export must agree
+//      on a shared logical size for the pattern to match.
 
 function normalizeColor(hex) {
   const num = parseInt(hex.replace("#", ""), 16);
@@ -314,7 +324,7 @@ const SHADERS = {
 
 void main() {
   float time = u_time * u_global.noiseSpeed;
-  vec2 noiseCoord = resolution * uvNorm * u_global.noiseFreq;
+  vec2 noiseCoord = u_noiseResolution * uvNorm * u_global.noiseFreq;
   float tilt = resolution.y / 2.0 * uvNorm.y;
   float incline = resolution.x * uvNorm.x / 2.0 * u_vertDeform.incline;
   float offset = resolution.x / 2.0 * u_vertDeform.incline * mix(u_vertDeform.offsetBottom, u_vertDeform.offsetTop, uv.y);
@@ -434,11 +444,17 @@ class GradientRenderer {
     this._animate = this._animate.bind(this);
   }
 
-  init(width, height, meshQuality = 1) {
+  // logicalWidth/logicalHeight (default: same as the real pixel size) are
+  // the "designed" output dimensions - e.g. the wallpaper size the user
+  // picked, before any preview downscale or export supersampling. They
+  // drive the noise pattern's frequency (see u_noiseResolution below) so
+  // the SAME composition appears in the low-res preview and the
+  // high-res/supersampled export; only pixel density differs between them.
+  init(width, height, meshQuality = 1, logicalWidth = width, logicalHeight = height) {
     this.minigl = new MiniGl(this.canvas, width, height);
     const depth = GradientRenderer._clipDepth(height);
     this.minigl.setOrthographicCamera(0, 0, 0, -depth, depth);
-    this._buildMesh(width, height, meshQuality);
+    this._buildMesh(width, height, meshQuality, logicalWidth, logicalHeight);
     return this;
   }
 
@@ -452,12 +468,13 @@ class GradientRenderer {
     return Math.max(2000, height);
   }
 
-  _buildMesh(width, height, meshQuality) {
+  _buildMesh(width, height, meshQuality, logicalWidth = width, logicalHeight = height) {
     const sectionColors = this.colors.map(normalizeColor);
     const uniforms = {
       u_time: new this.minigl.Uniform({ value: this.time }),
-      u_shadow_power: new this.minigl.Uniform({ value: width < 600 ? 5 : 6 }),
+      u_shadow_power: new this.minigl.Uniform({ value: logicalWidth < 600 ? 5 : 6 }),
       u_darken_top: new this.minigl.Uniform({ value: this.darkenTop ? 1 : 0 }),
+      u_noiseResolution: new this.minigl.Uniform({ value: [logicalWidth, logicalHeight], type: "vec2" }),
       u_active_colors: new this.minigl.Uniform({ value: [1, 1, 1, 1], type: "vec4" }),
       u_global: new this.minigl.Uniform({
         value: {
@@ -510,7 +527,7 @@ class GradientRenderer {
     this.mesh = new this.minigl.Mesh(this.geometry, this.material);
   }
 
-  setSize(width, height, meshQuality = 1) {
+  setSize(width, height, meshQuality = 1, logicalWidth = width, logicalHeight = height) {
     this.minigl.setSize(width, height);
     const depth = GradientRenderer._clipDepth(height);
     this.minigl.setOrthographicCamera(0, 0, 0, -depth, depth);
@@ -518,7 +535,8 @@ class GradientRenderer {
     const ySeg = Math.max(1, Math.round(height * 0.16 * meshQuality));
     this.mesh.geometry.setTopology(xSeg, ySeg);
     this.mesh.geometry.setSize(width, height);
-    this.uniforms.u_shadow_power.value = width < 600 ? 5 : 6;
+    this.uniforms.u_shadow_power.value = logicalWidth < 600 ? 5 : 6;
+    this.uniforms.u_noiseResolution.value = [logicalWidth, logicalHeight];
   }
 
   setColors(hexColors) {
@@ -570,7 +588,10 @@ class GradientRenderer {
 
     const offscreen = document.createElement("canvas");
     const renderer = new GradientRenderer(offscreen, { colors, darkenTop, amp, seed, freqX, freqY });
-    renderer.init(renderWidth, renderHeight, meshQuality);
+    // Pass the un-supersampled (width, height) as the logical size so the
+    // exported pattern matches what the preview showed at the same logical
+    // size - supersampling only adds pixel density, not a different pattern.
+    renderer.init(renderWidth, renderHeight, meshQuality, width, height);
     renderer.renderFrame(time ?? renderer.time);
 
     const out = document.createElement("canvas");

@@ -1,12 +1,12 @@
 (() => {
   const PRESETS = {
     phone: { width: 1080, height: 1920 },
+    phone4k: { width: 2160, height: 3840 },
     desktop: { width: 1920, height: 1080 },
     desktop4k: { width: 3840, height: 2160 },
   };
 
   const canvas = document.getElementById("preview");
-  const canvasFrame = document.getElementById("canvasFrame");
   const dimsLabel = document.getElementById("dimsLabel");
   const customSizeRow = document.getElementById("customSizeRow");
   const customWidthInput = document.getElementById("customWidth");
@@ -25,12 +25,16 @@
     colors: colorInputs.map((el) => el.value),
     darkenTop: false,
     seed: Math.random() * 1000,
+    playing: true,
   };
 
   // Live preview renders at a capped-but-DPR-aware resolution so it stays
   // crisp on the screen without paying full export cost every frame; the
   // PNG export always re-renders from scratch at full target resolution
-  // with extra supersampling (see exportPNG below).
+  // with extra supersampling (see exportPNG below). The *logical* size
+  // passed to the renderer (see initRenderer) is always state.width/height
+  // regardless of this pixel resolution, so the noise pattern's frequency
+  // matches what export produces - only pixel density differs.
   const MAX_PREVIEW_LONG_EDGE = 1400;
 
   function previewResolution(width, height) {
@@ -45,6 +49,10 @@
 
   let renderer = null;
 
+  function syncPlayButton() {
+    togglePlayBtn.textContent = state.playing ? "Pause" : "Resume";
+  }
+
   function initRenderer() {
     const { w, h } = previewResolution(state.width, state.height);
     if (renderer) renderer.pause();
@@ -53,14 +61,27 @@
       darkenTop: state.darkenTop,
       seed: state.seed,
     });
-    renderer.init(w, h, 1.4);
-    renderer.play();
+    renderer.init(w, h, 1.4, state.width, state.height);
+    if (state.playing) {
+      renderer.play();
+    } else {
+      // Not playing: draw one static frame so the new layout/seed is
+      // reflected immediately instead of showing a blank canvas until Resume.
+      renderer.renderFrame(renderer.time);
+    }
+    syncPlayButton();
   }
 
   function applyLayout() {
     canvas.style.aspectRatio = `${state.width} / ${state.height}`;
     dimsLabel.textContent = `${state.width} × ${state.height}px`;
     initRenderer();
+  }
+
+  // While paused there is no animation loop redrawing the canvas, so any
+  // state change (color, darken-top) needs an explicit repaint to show up.
+  function refreshIfPaused() {
+    if (renderer && !state.playing) renderer.renderFrame(renderer.time);
   }
 
   function setPreset(name) {
@@ -100,6 +121,7 @@
     input.addEventListener("input", () => {
       state.colors[i] = input.value;
       if (renderer) renderer.setColors(state.colors);
+      refreshIfPaused();
     });
   });
 
@@ -114,6 +136,7 @@
       colorInputs[i].value = hex;
     });
     if (renderer) renderer.setColors(state.colors);
+    refreshIfPaused();
   });
 
   function hslToHex(h, s, l) {
@@ -128,17 +151,18 @@
   darkenTopInput.addEventListener("change", () => {
     state.darkenTop = darkenTopInput.checked;
     if (renderer) renderer.setDarkenTop(state.darkenTop);
+    refreshIfPaused();
   });
 
   togglePlayBtn.addEventListener("click", () => {
     if (!renderer) return;
-    if (renderer.playing) {
-      renderer.pause();
-      togglePlayBtn.textContent = "Devam et";
-    } else {
+    state.playing = !state.playing;
+    if (state.playing) {
       renderer.play();
-      togglePlayBtn.textContent = "Duraklat";
+    } else {
+      renderer.pause();
     }
+    syncPlayButton();
   });
 
   document.getElementById("reshuffle").addEventListener("click", () => {
@@ -154,7 +178,7 @@
 
   async function exportPNG() {
     exportBtn.disabled = true;
-    exportStatus.textContent = "Render ediliyor...";
+    exportStatus.textContent = "Rendering...";
     try {
       await new Promise((r) => requestAnimationFrame(r));
       const supersample = parseFloat(supersampleSelect.value);
@@ -177,10 +201,10 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      exportStatus.textContent = `Hazır: ${state.width}×${state.height}px PNG indirildi.`;
+      exportStatus.textContent = `Done: ${state.width}×${state.height}px PNG downloaded.`;
     } catch (err) {
       console.error(err);
-      exportStatus.textContent = "Export sırasında bir hata oluştu.";
+      exportStatus.textContent = "Something went wrong during export.";
     } finally {
       exportBtn.disabled = false;
     }

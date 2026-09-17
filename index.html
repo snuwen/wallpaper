@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="tr">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,69 +10,73 @@
   <div class="app">
     <aside class="panel">
       <h1>Gradient Wallpaper Studio</h1>
-      <p class="subtitle">Animasyonlu gradient arkaplanından yüksek çözünürlüklü PNG duvar kağıdı üret.</p>
+      <p class="subtitle">Turn the animated gradient background into a high-resolution PNG wallpaper.</p>
 
       <section class="group">
-        <h2>Boyut</h2>
+        <h2>Size</h2>
         <div class="preset-grid">
           <button class="preset-btn active" data-preset="phone">
             <span class="preset-icon phone-icon"></span>
-            <span>Telefon<br /><small>9:16 · 1080×1920</small></span>
+            <span>Phone<br /><small>9:16 · 1080×1920</small></span>
+          </button>
+          <button class="preset-btn" data-preset="phone4k">
+            <span class="preset-icon phone-icon"></span>
+            <span>Phone 4K<br /><small>9:16 · 2160×3840</small></span>
           </button>
           <button class="preset-btn" data-preset="desktop">
             <span class="preset-icon desktop-icon"></span>
-            <span>Masaüstü<br /><small>16:9 · 1920×1080</small></span>
+            <span>Desktop<br /><small>16:9 · 1920×1080</small></span>
           </button>
           <button class="preset-btn" data-preset="desktop4k">
             <span class="preset-icon desktop-icon"></span>
-            <span>Masaüstü 4K<br /><small>16:9 · 3840×2160</small></span>
+            <span>Desktop 4K<br /><small>16:9 · 3840×2160</small></span>
           </button>
           <button class="preset-btn" data-preset="custom">
             <span class="preset-icon custom-icon"></span>
-            <span>Özel<br /><small>kendi ölçün</small></span>
+            <span>Custom<br /><small>your own size</small></span>
           </button>
         </div>
 
         <div class="custom-size" id="customSizeRow" hidden>
-          <label>Genişlik<input type="number" id="customWidth" min="16" max="8000" value="1080" /></label>
-          <label>Yükseklik<input type="number" id="customHeight" min="16" max="8000" value="1920" /></label>
+          <label>Width<input type="number" id="customWidth" min="16" max="8000" value="1080" /></label>
+          <label>Height<input type="number" id="customHeight" min="16" max="8000" value="1920" /></label>
         </div>
       </section>
 
       <section class="group">
-        <h2>Renkler</h2>
+        <h2>Colors</h2>
         <div class="color-row">
           <label class="color-swatch"><input type="color" id="color1" value="#5f0cd6" /><span>1</span></label>
           <label class="color-swatch"><input type="color" id="color2" value="#2b6bff" /><span>2</span></label>
           <label class="color-swatch"><input type="color" id="color3" value="#ff3d81" /><span>3</span></label>
           <label class="color-swatch"><input type="color" id="color4" value="#ff8a3d" /><span>4</span></label>
         </div>
-        <button id="randomizeColors" class="text-btn">Rastgele renkler</button>
+        <button id="randomizeColors" class="text-btn">Randomize colors</button>
       </section>
 
       <section class="group">
-        <h2>Kalite</h2>
+        <h2>Quality</h2>
         <label class="field">
-          Export süper örnekleme
+          Export supersampling
           <select id="supersample">
-            <option value="2">2× (hızlı)</option>
-            <option value="3" selected>3× (önerilen)</option>
-            <option value="4">4× (en yüksek kalite)</option>
+            <option value="2">2× (fast)</option>
+            <option value="3" selected>3× (recommended)</option>
+            <option value="4">4× (highest quality)</option>
           </select>
         </label>
-        <p class="hint">Daha yüksek değer, keskin geçişlerdeki tırtıklı görüntüyü daha da azaltır ama export süresi uzar.</p>
+        <p class="hint">Higher values further reduce jagged edges at sharp color transitions, at the cost of export time.</p>
       </section>
 
       <section class="group">
-        <h2>Hareket</h2>
-        <label class="field checkbox"><input type="checkbox" id="darkenTop" /> Üstü koyulaştır</label>
+        <h2>Motion</h2>
+        <label class="field checkbox"><input type="checkbox" id="darkenTop" /> Darken top</label>
         <div class="playback-row">
-          <button id="togglePlay" class="text-btn">Duraklat</button>
-          <button id="reshuffle" class="text-btn">Yeni desen</button>
+          <button id="togglePlay" class="text-btn">Pause</button>
+          <button id="reshuffle" class="text-btn">New pattern</button>
         </div>
       </section>
 
-      <button id="exportBtn" class="export-btn">PNG olarak dışa aktar</button>
+      <button id="exportBtn" class="export-btn">Export as PNG</button>
       <p class="hint" id="exportStatus"></p>
     </aside>
 
