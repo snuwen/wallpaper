@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gradient Wallpaper Studio</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <h1>Gradient Wallpaper Studio</h1>
+      <p class="subtitle">Animasyonlu gradient arkaplanından yüksek çözünürlüklü PNG duvar kağıdı üret.</p>
+
+      <section class="group">
+        <h2>Boyut</h2>
+        <div class="preset-grid">
+          <button class="preset-btn active" data-preset="phone">
+            <span class="preset-icon phone-icon"></span>
+            <span>Telefon<br /><small>9:16 · 1080×1920</small></span>
+          </button>
+          <button class="preset-btn" data-preset="desktop">
+            <span class="preset-icon desktop-icon"></span>
+            <span>Masaüstü<br /><small>16:9 · 1920×1080</small></span>
+          </button>
+          <button class="preset-btn" data-preset="desktop4k">
+            <span class="preset-icon desktop-icon"></span>
+            <span>Masaüstü 4K<br /><small>16:9 · 3840×2160</small></span>
+          </button>
+          <button class="preset-btn" data-preset="custom">
+            <span class="preset-icon custom-icon"></span>
+            <span>Özel<br /><small>kendi ölçün</small></span>
+          </button>
+        </div>
+
+        <div class="custom-size" id="customSizeRow" hidden>
+          <label>Genişlik<input type="number" id="customWidth" min="16" max="8000" value="1080" /></label>
+          <label>Yükseklik<input type="number" id="customHeight" min="16" max="8000" value="1920" /></label>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Renkler</h2>
+        <div class="color-row">
+          <label class="color-swatch"><input type="color" id="color1" value="#5f0cd6" /><span>1</span></label>
+          <label class="color-swatch"><input type="color" id="color2" value="#2b6bff" /><span>2</span></label>
+          <label class="color-swatch"><input type="color" id="color3" value="#ff3d81" /><span>3</span></label>
+          <label class="color-swatch"><input type="color" id="color4" value="#ff8a3d" /><span>4</span></label>
+        </div>
+        <button id="randomizeColors" class="text-btn">Rastgele renkler</button>
+      </section>
+
+      <section class="group">
+        <h2>Kalite</h2>
+        <label class="field">
+          Export süper örnekleme
+          <select id="supersample">
+            <option value="2">2× (hızlı)</option>
+            <option value="3" selected>3× (önerilen)</option>
+            <option value="4">4× (en yüksek kalite)</option>
+          </select>
+        </label>
+        <p class="hint">Daha yüksek değer, keskin geçişlerdeki tırtıklı görüntüyü daha da azaltır ama export süresi uzar.</p>
+      </section>
+
+      <section class="group">
+        <h2>Hareket</h2>
+        <label class="field checkbox"><input type="checkbox" id="darkenTop" /> Üstü koyulaştır</label>
+        <div class="playback-row">
+          <button id="togglePlay" class="text-btn">Duraklat</button>
+          <button id="reshuffle" class="text-btn">Yeni desen</button>
+        </div>
+      </section>
+
+      <button id="exportBtn" class="export-btn">PNG olarak dışa aktar</button>
+      <p class="hint" id="exportStatus"></p>
+    </aside>
+
+    <main class="stage">
+      <div class="canvas-frame" id="canvasFrame">
+        <canvas id="preview"></canvas>
+      </div>
+      <p class="dims" id="dimsLabel"></p>
+    </main>
+  </div>
+
+  <script src="gradient-engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

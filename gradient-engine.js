@@ -1,0 +1,589 @@
+// Wallpaper gradient engine.
+// Adapted from the WebGL gradient renderer used in TimerV1 (a MiniGl-based
+// implementation of Stripe's open-source gradient mesh technique).
+//
+// Two changes from the original fix the quality/aliasing problems the
+// standalone widget needs to avoid:
+//   1. The canvas backing-store resolution is always driven explicitly by
+//      the caller (target CSS size * devicePixelRatio), never by
+//      window.innerWidth. The original left the WebGL framebuffer at CSS
+//      pixel resolution, so on any HiDPI screen - and on export - the
+//      gradient was upscaled from a lower-res buffer, producing blur and
+//      jagged edges.
+//   2. Mesh density (xSegCount/ySegCount) scales with the target
+//      resolution instead of being fixed. Vertex colors are only computed
+//      per-vertex and linearly interpolated across triangles, so a coarse
+//      mesh shows visible triangle facets/banding in sharp gradient
+//      transitions. A denser mesh removes the faceting; export uses an
+//      even denser mesh plus supersampling for the cleanest result.
+
+function normalizeColor(hex) {
+  const num = parseInt(hex.replace("#", ""), 16);
+  return [(num >> 16 & 255) / 255, (num >> 8 & 255) / 255, (255 & num) / 255];
+}
+
+class MiniGl {
+  constructor(canvas, width, height) {
+    this.canvas = canvas;
+    this.gl = canvas.getContext("webgl", { antialias: true, preserveDrawingBuffer: true });
+    if (!this.gl) throw new Error("WebGL is not supported in this browser.");
+    this.meshes = [];
+    const context = this.gl;
+    // A dense mesh (needed to avoid triangle-facet banding at high export
+    // resolutions) can exceed 65535 vertices, the max index value a
+    // Uint16Array can hold - past that the index buffer silently wraps
+    // around and corrupts the mesh (only part of the plane renders).
+    // OES_element_index_uint lifts that to 32-bit indices; every modern
+    // WebGL1 implementation supports it, but we fall back gracefully.
+    this.uintIndicesExt = context.getExtension("OES_element_index_uint");
+
+    const miniGl = this;
+
+    this.Material = class {
+      constructor(vertexShaders, fragments, uniforms = {}) {
+        const material = this;
+        function getShaderByType(type, source) {
+          const shader = context.createShader(type);
+          context.shaderSource(shader, source);
+          context.compileShader(shader);
+          if (!context.getShaderParameter(shader, context.COMPILE_STATUS)) {
+            console.error(context.getShaderInfoLog(shader));
+          }
+          return shader;
+        }
+        function getUniformVariableDeclarations(uniforms, type) {
+          return Object.entries(uniforms).map(([name, value]) => value.getDeclaration(name, type)).join("\n");
+        }
+        material.uniforms = uniforms;
+        material.uniformInstances = [];
+
+        const prefix = "\n          precision highp float;\n        ";
+        material.vertexSource = `
+          ${prefix}
+          attribute vec4 position;
+          attribute vec2 uv;
+          attribute vec2 uvNorm;
+          ${getUniformVariableDeclarations(miniGl.commonUniforms, "vertex")}
+          ${getUniformVariableDeclarations(uniforms, "vertex")}
+          ${vertexShaders}
+        `;
+        material.fragmentSource = `
+          ${prefix}
+          ${getUniformVariableDeclarations(miniGl.commonUniforms, "fragment")}
+          ${getUniformVariableDeclarations(uniforms, "fragment")}
+          ${fragments}
+        `;
+        material.vertexShader = getShaderByType(context.VERTEX_SHADER, material.vertexSource);
+        material.fragmentShader = getShaderByType(context.FRAGMENT_SHADER, material.fragmentSource);
+        material.program = context.createProgram();
+        context.attachShader(material.program, material.vertexShader);
+        context.attachShader(material.program, material.fragmentShader);
+        context.linkProgram(material.program);
+        if (!context.getProgramParameter(material.program, context.LINK_STATUS)) {
+          console.error(context.getProgramInfoLog(material.program));
+        }
+        context.useProgram(material.program);
+        material.attachUniforms(undefined, miniGl.commonUniforms);
+        material.attachUniforms(undefined, material.uniforms);
+      }
+      attachUniforms(name, uniforms) {
+        const material = this;
+        if (name === undefined) {
+          Object.entries(uniforms).forEach(([n, u]) => material.attachUniforms(n, u));
+        } else if (uniforms.type === "array") {
+          uniforms.value.forEach((u, i) => material.attachUniforms(`${name}[${i}]`, u));
+        } else if (uniforms.type === "struct") {
+          Object.entries(uniforms.value).forEach(([u, i]) => material.attachUniforms(`${name}.${u}`, i));
+        } else {
+          material.uniformInstances.push({
+            uniform: uniforms,
+            location: context.getUniformLocation(material.program, name),
+          });
+        }
+      }
+    };
+
+    this.Uniform = class {
+      constructor(opts) {
+        this.type = "float";
+        Object.assign(this, opts);
+        this.typeFn = {
+          float: "1f", int: "1i", vec2: "2fv", vec3: "3fv", vec4: "4fv", mat4: "Matrix4fv",
+        }[this.type] || "1f";
+        this.update();
+      }
+      update(location) {
+        if (this.value === undefined) return;
+        const isMatrix = this.typeFn.indexOf("Matrix") === 0;
+        context[`uniform${this.typeFn}`](location, isMatrix ? this.transpose : this.value, isMatrix ? this.value : null);
+      }
+      getDeclaration(name, type, length) {
+        const uniform = this;
+        if (uniform.excludeFrom === type) return "";
+        if (uniform.type === "array") {
+          return uniform.value[0].getDeclaration(name, type, uniform.value.length) + `\nconst int ${name}_length = ${uniform.value.length};`;
+        }
+        if (uniform.type === "struct") {
+          let structName = name.replace("u_", "");
+          structName = structName.charAt(0).toUpperCase() + structName.slice(1);
+          return `uniform struct ${structName} {\n` +
+            Object.entries(uniform.value).map(([n, u]) => u.getDeclaration(n, type).replace(/^uniform/, "")).join("") +
+            `\n} ${name}${length > 0 ? `[${length}]` : ""};`;
+        }
+        return `uniform ${uniform.type} ${name}${length > 0 ? `[${length}]` : ""};`;
+      }
+    };
+
+    this.PlaneGeometry = class {
+      constructor(width, height, xSeg, ySeg, orientation) {
+        context.createBuffer();
+        const useUintIndex = !!miniGl.uintIndicesExt;
+        this.attributes = {
+          position: new miniGl.Attribute({ target: context.ARRAY_BUFFER, size: 3 }),
+          uv: new miniGl.Attribute({ target: context.ARRAY_BUFFER, size: 2 }),
+          uvNorm: new miniGl.Attribute({ target: context.ARRAY_BUFFER, size: 2 }),
+          index: new miniGl.Attribute({
+            target: context.ELEMENT_ARRAY_BUFFER,
+            size: 3,
+            type: useUintIndex ? context.UNSIGNED_INT : context.UNSIGNED_SHORT,
+          }),
+        };
+        this.useUintIndex = useUintIndex;
+        this.setTopology(xSeg, ySeg);
+        this.setSize(width, height, orientation);
+      }
+      setTopology(xSegCount = 1, ySegCount = 1) {
+        const geo = this;
+        // Without 32-bit index support, clamp segment counts so
+        // (xSeg+1)*(ySeg+1) never exceeds the 65535 a Uint16Array can
+        // address - otherwise the index buffer wraps and corrupts the mesh.
+        // Even with 32-bit indices available, cap the absolute vertex count
+        // so a large supersampled export doesn't blow up memory/time - well
+        // past this density the mesh is already visually indistinguishable
+        // from a finer one since color is a smooth per-fragment blend.
+        const maxVertices = geo.useUintIndex ? 400000 : 65000;
+        while ((xSegCount + 1) * (ySegCount + 1) > maxVertices) {
+          xSegCount = Math.max(1, Math.floor(xSegCount * 0.9));
+          ySegCount = Math.max(1, Math.floor(ySegCount * 0.9));
+        }
+        geo.xSegCount = xSegCount;
+        geo.ySegCount = ySegCount;
+        geo.vertexCount = (geo.xSegCount + 1) * (geo.ySegCount + 1);
+        geo.quadCount = geo.xSegCount * geo.ySegCount * 2;
+        geo.attributes.uv.values = new Float32Array(2 * geo.vertexCount);
+        geo.attributes.uvNorm.values = new Float32Array(2 * geo.vertexCount);
+        geo.attributes.index.values = geo.useUintIndex
+          ? new Uint32Array(3 * geo.quadCount)
+          : new Uint16Array(3 * geo.quadCount);
+        for (let y = 0; y <= geo.ySegCount; y++) {
+          for (let x = 0; x <= geo.xSegCount; x++) {
+            const i = y * (geo.xSegCount + 1) + x;
+            geo.attributes.uv.values[2 * i] = x / geo.xSegCount;
+            geo.attributes.uv.values[2 * i + 1] = 1 - y / geo.ySegCount;
+            geo.attributes.uvNorm.values[2 * i] = (x / geo.xSegCount) * 2 - 1;
+            geo.attributes.uvNorm.values[2 * i + 1] = 1 - (y / geo.ySegCount) * 2;
+            if (x < geo.xSegCount && y < geo.ySegCount) {
+              const s = y * geo.xSegCount + x;
+              geo.attributes.index.values[6 * s] = i;
+              geo.attributes.index.values[6 * s + 1] = i + 1 + geo.xSegCount;
+              geo.attributes.index.values[6 * s + 2] = i + 1;
+              geo.attributes.index.values[6 * s + 3] = i + 1;
+              geo.attributes.index.values[6 * s + 4] = i + 1 + geo.xSegCount;
+              geo.attributes.index.values[6 * s + 5] = i + 2 + geo.xSegCount;
+            }
+          }
+        }
+        geo.attributes.uv.update();
+        geo.attributes.uvNorm.update();
+        geo.attributes.index.update();
+      }
+      setSize(width = 1, height = 1, orientation = "xz") {
+        const geo = this;
+        geo.width = width;
+        geo.height = height;
+        geo.orientation = orientation;
+        if (!geo.attributes.position.values || geo.attributes.position.values.length !== 3 * geo.vertexCount) {
+          geo.attributes.position.values = new Float32Array(3 * geo.vertexCount);
+        }
+        const xOrigin = width / -2;
+        const yOrigin = height / -2;
+        const segW = width / geo.xSegCount;
+        const segH = height / geo.ySegCount;
+        for (let y = 0; y <= geo.ySegCount; y++) {
+          const yPos = yOrigin + y * segH;
+          for (let x = 0; x <= geo.xSegCount; x++) {
+            const xPos = xOrigin + x * segW;
+            const i = y * (geo.xSegCount + 1) + x;
+            geo.attributes.position.values[3 * i + "xyz".indexOf(orientation[0])] = xPos;
+            geo.attributes.position.values[3 * i + "xyz".indexOf(orientation[1])] = -yPos;
+          }
+        }
+        geo.attributes.position.update();
+      }
+    };
+
+    this.Mesh = class {
+      constructor(geometry, material) {
+        const mesh = this;
+        mesh.geometry = geometry;
+        mesh.material = material;
+        mesh.attributeInstances = [];
+        Object.entries(mesh.geometry.attributes).forEach(([name, attribute]) => {
+          mesh.attributeInstances.push({ attribute, location: attribute.attach(name, mesh.material.program) });
+        });
+        miniGl.meshes.push(mesh);
+      }
+      draw() {
+        context.useProgram(this.material.program);
+        this.material.uniformInstances.forEach(({ uniform, location }) => uniform.update(location));
+        this.attributeInstances.forEach(({ attribute, location }) => attribute.use(location));
+        const indexAttr = this.geometry.attributes.index;
+        context.drawElements(context.TRIANGLES, indexAttr.values.length, indexAttr.type, 0);
+      }
+      remove() {
+        miniGl.meshes = miniGl.meshes.filter((m) => m !== this);
+      }
+    };
+
+    this.Attribute = class {
+      constructor(opts) {
+        this.type = context.FLOAT;
+        this.normalized = false;
+        this.buffer = context.createBuffer();
+        Object.assign(this, opts);
+        this.update();
+      }
+      update() {
+        if (this.values === undefined) return;
+        context.bindBuffer(this.target, this.buffer);
+        context.bufferData(this.target, this.values, context.STATIC_DRAW);
+      }
+      attach(name, program) {
+        const location = context.getAttribLocation(program, name);
+        if (this.target === context.ARRAY_BUFFER) {
+          context.enableVertexAttribArray(location);
+          context.vertexAttribPointer(location, this.size, this.type, this.normalized, 0, 0);
+        }
+        return location;
+      }
+      use(location) {
+        context.bindBuffer(this.target, this.buffer);
+        if (this.target === context.ARRAY_BUFFER) {
+          context.enableVertexAttribArray(location);
+          context.vertexAttribPointer(location, this.size, this.type, this.normalized, 0, 0);
+        }
+      }
+    };
+
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    this.commonUniforms = {
+      projectionMatrix: new this.Uniform({ type: "mat4", value: identity }),
+      modelViewMatrix: new this.Uniform({ type: "mat4", value: identity }),
+      resolution: new this.Uniform({ type: "vec2", value: [1, 1] }),
+      aspectRatio: new this.Uniform({ type: "float", value: 1 }),
+    };
+
+    if (width && height) this.setSize(width, height);
+  }
+  setSize(width = 640, height = 480) {
+    this.width = width;
+    this.height = height;
+    this.canvas.width = width;
+    this.canvas.height = height;
+    this.gl.viewport(0, 0, width, height);
+    this.commonUniforms.resolution.value = [width, height];
+    this.commonUniforms.aspectRatio.value = width / height;
+  }
+  setOrthographicCamera(x = 0, y = 0, z = 0, near = -2000, far = 2000) {
+    this.commonUniforms.projectionMatrix.value = [
+      2 / this.width, 0, 0, 0,
+      0, 2 / this.height, 0, 0,
+      0, 0, 2 / (near - far), 0,
+      x, y, z, 1,
+    ];
+  }
+  render() {
+    this.gl.clearColor(0, 0, 0, 0);
+    this.gl.clearDepth(1);
+    this.meshes.forEach((m) => m.draw());
+  }
+}
+
+const SHADERS = {
+  vertex: `varying vec3 v_color;
+
+void main() {
+  float time = u_time * u_global.noiseSpeed;
+  vec2 noiseCoord = resolution * uvNorm * u_global.noiseFreq;
+  float tilt = resolution.y / 2.0 * uvNorm.y;
+  float incline = resolution.x * uvNorm.x / 2.0 * u_vertDeform.incline;
+  float offset = resolution.x / 2.0 * u_vertDeform.incline * mix(u_vertDeform.offsetBottom, u_vertDeform.offsetTop, uv.y);
+
+  float noise = snoise(vec3(
+    noiseCoord.x * u_vertDeform.noiseFreq.x + time * u_vertDeform.noiseFlow,
+    noiseCoord.y * u_vertDeform.noiseFreq.y,
+    time * u_vertDeform.noiseSpeed + u_vertDeform.noiseSeed
+  )) * u_vertDeform.noiseAmp;
+
+  noise *= 1.0 - pow(abs(uvNorm.y), 2.0);
+  noise = max(0.0, noise);
+
+  vec3 pos = vec3(position.x, position.y + tilt + incline + noise - offset, position.z);
+
+  if (u_active_colors[0] == 1.0) v_color = u_baseColor;
+
+  for (int i = 0; i < u_waveLayers_length; i++) {
+    if (u_active_colors[i + 1] == 1.0) {
+      WaveLayers layer = u_waveLayers[i];
+      float layerNoise = smoothstep(
+        layer.noiseFloor,
+        layer.noiseCeil,
+        snoise(vec3(
+          noiseCoord.x * layer.noiseFreq.x + time * layer.noiseFlow,
+          noiseCoord.y * layer.noiseFreq.y,
+          time * layer.noiseSpeed + layer.noiseSeed
+        )) / 2.0 + 0.5
+      );
+      v_color = blendNormal(v_color, layer.color, pow(layerNoise, 4.0));
+    }
+  }
+
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+}`,
+  noise: `// Ashima Arts / Ian McEwan simplex noise (MIT licensed, webgl-noise)
+vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+float snoise(vec3 v) {
+  const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
+  const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+  vec3 i = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min(g.xyz, l.zxy);
+  vec3 i2 = max(g.xyz, l.zxy);
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+  i = mod289(i);
+  vec4 p = permute(permute(permute(
+      i.z + vec4(0.0, i1.z, i2.z, 1.0))
+    + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+    + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+  float n_ = 0.142857142857;
+  vec3 ns = n_ * D.wyz - D.xzx;
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_);
+  vec4 x = x_ * ns.x + ns.yyyy;
+  vec4 y = y_ * ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+  vec4 b0 = vec4(x.xy, y.xy);
+  vec4 b1 = vec4(x.zw, y.zw);
+  vec4 s0 = floor(b0) * 2.0 + 1.0;
+  vec4 s1 = floor(b1) * 2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+  vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+  vec3 p0 = vec3(a0.xy, h.x);
+  vec3 p1 = vec3(a0.zw, h.y);
+  vec3 p2 = vec3(a1.xy, h.z);
+  vec3 p3 = vec3(a1.zw, h.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+  vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}`,
+  blend: `// https://github.com/jamieowen/glsl-blend (MIT)
+vec3 blendNormal(vec3 base, vec3 blend) { return blend; }
+vec3 blendNormal(vec3 base, vec3 blend, float opacity) { return (blendNormal(base, blend) * opacity + base * (1.0 - opacity)); }`,
+  fragment: `varying vec3 v_color;
+
+void main() {
+  vec3 color = v_color;
+  if (u_darken_top == 1.0) {
+    vec2 st = gl_FragCoord.xy / resolution.xy;
+    color.g -= pow(st.y + sin(-12.0) * st.x, u_shadow_power) * 0.4;
+  }
+  gl_FragColor = vec4(color, 1.0);
+}`,
+};
+
+class GradientRenderer {
+  // meshDensity controls vertices per CSS pixel along x/y - the original
+  // widget used a fixed [.06, .16], which is fine at small preview sizes
+  // but leaves visibly straight/faceted edges once the same mesh is
+  // stretched across a large export canvas. We scale mesh resolution with
+  // the actual render target instead of a fixed density.
+  constructor(canvas, options = {}) {
+    this.canvas = canvas;
+    this.colors = options.colors || ["#5f0cd6", "#2b6bff", "#ff3d81", "#ff8a3d"];
+    this.darkenTop = options.darkenTop || false;
+    this.amp = options.amp ?? 320;
+    this.seed = options.seed ?? 5;
+    this.freqX = options.freqX ?? 14e-5;
+    this.freqY = options.freqY ?? 29e-5;
+    this.time = 1253106;
+    this.last = 0;
+    this.playing = false;
+    this.rafId = null;
+    this._animate = this._animate.bind(this);
+  }
+
+  init(width, height, meshQuality = 1) {
+    this.minigl = new MiniGl(this.canvas, width, height);
+    const depth = GradientRenderer._clipDepth(height);
+    this.minigl.setOrthographicCamera(0, 0, 0, -depth, depth);
+    this._buildMesh(width, height, meshQuality);
+    return this;
+  }
+
+  // The mesh's z-extent (its "xz" orientation puts the height axis on z,
+  // used only for tilting the plane, not for actual depth) is +/-height/2
+  // in world units. The orthographic camera's near/far planes must cover
+  // that range or the GPU clips vertices near the top/bottom edges - which
+  // silently cuts off the gradient at any resolution taller than the old
+  // fixed +/-2000 default (e.g. a portrait export, or a supersampled one).
+  static _clipDepth(height) {
+    return Math.max(2000, height);
+  }
+
+  _buildMesh(width, height, meshQuality) {
+    const sectionColors = this.colors.map(normalizeColor);
+    const uniforms = {
+      u_time: new this.minigl.Uniform({ value: this.time }),
+      u_shadow_power: new this.minigl.Uniform({ value: width < 600 ? 5 : 6 }),
+      u_darken_top: new this.minigl.Uniform({ value: this.darkenTop ? 1 : 0 }),
+      u_active_colors: new this.minigl.Uniform({ value: [1, 1, 1, 1], type: "vec4" }),
+      u_global: new this.minigl.Uniform({
+        value: {
+          noiseFreq: new this.minigl.Uniform({ value: [this.freqX, this.freqY], type: "vec2" }),
+          noiseSpeed: new this.minigl.Uniform({ value: 5e-6 }),
+        },
+        type: "struct",
+      }),
+      u_vertDeform: new this.minigl.Uniform({
+        value: {
+          incline: new this.minigl.Uniform({ value: 0 }),
+          offsetTop: new this.minigl.Uniform({ value: -0.5 }),
+          offsetBottom: new this.minigl.Uniform({ value: -0.5 }),
+          noiseFreq: new this.minigl.Uniform({ value: [3, 4], type: "vec2" }),
+          noiseAmp: new this.minigl.Uniform({ value: this.amp }),
+          noiseSpeed: new this.minigl.Uniform({ value: 10 }),
+          noiseFlow: new this.minigl.Uniform({ value: 3 }),
+          noiseSeed: new this.minigl.Uniform({ value: this.seed }),
+        },
+        type: "struct",
+        excludeFrom: "fragment",
+      }),
+      u_baseColor: new this.minigl.Uniform({ value: sectionColors[0], type: "vec3", excludeFrom: "fragment" }),
+      u_waveLayers: new this.minigl.Uniform({ value: [], excludeFrom: "fragment", type: "array" }),
+    };
+    for (let i = 1; i < sectionColors.length; i++) {
+      uniforms.u_waveLayers.value.push(new this.minigl.Uniform({
+        value: {
+          color: new this.minigl.Uniform({ value: sectionColors[i], type: "vec3" }),
+          noiseFreq: new this.minigl.Uniform({ value: [2 + i / sectionColors.length, 3 + i / sectionColors.length], type: "vec2" }),
+          noiseSpeed: new this.minigl.Uniform({ value: 11 + 0.3 * i }),
+          noiseFlow: new this.minigl.Uniform({ value: 6.5 + 0.3 * i }),
+          noiseSeed: new this.minigl.Uniform({ value: this.seed + 10 * i }),
+          noiseFloor: new this.minigl.Uniform({ value: 0.1 }),
+          noiseCeil: new this.minigl.Uniform({ value: 0.63 + 0.07 * i }),
+        },
+        type: "struct",
+      }));
+    }
+    this.uniforms = uniforms;
+    const vertexShader = [SHADERS.noise, SHADERS.blend, SHADERS.vertex].join("\n\n");
+    this.material = new this.minigl.Material(vertexShader, SHADERS.fragment, uniforms);
+
+    // Mesh density: baseline matches the original widget's feel at 1x, but
+    // is driven by real pixel dimensions and a quality multiplier so large
+    // exports get a proportionally denser mesh instead of visible facets.
+    const xSeg = Math.max(1, Math.round(width * 0.06 * meshQuality));
+    const ySeg = Math.max(1, Math.round(height * 0.16 * meshQuality));
+    this.geometry = new this.minigl.PlaneGeometry(width, height, xSeg, ySeg);
+    this.mesh = new this.minigl.Mesh(this.geometry, this.material);
+  }
+
+  setSize(width, height, meshQuality = 1) {
+    this.minigl.setSize(width, height);
+    const depth = GradientRenderer._clipDepth(height);
+    this.minigl.setOrthographicCamera(0, 0, 0, -depth, depth);
+    const xSeg = Math.max(1, Math.round(width * 0.06 * meshQuality));
+    const ySeg = Math.max(1, Math.round(height * 0.16 * meshQuality));
+    this.mesh.geometry.setTopology(xSeg, ySeg);
+    this.mesh.geometry.setSize(width, height);
+    this.uniforms.u_shadow_power.value = width < 600 ? 5 : 6;
+  }
+
+  setColors(hexColors) {
+    this.colors = hexColors;
+    const normalized = hexColors.map(normalizeColor);
+    if (normalized[0]) this.uniforms.u_baseColor.value = normalized[0];
+    (this.uniforms.u_waveLayers.value || []).forEach((layer, i) => {
+      if (normalized[i + 1]) layer.value.color.value = normalized[i + 1];
+    });
+  }
+
+  setDarkenTop(enabled) {
+    this.darkenTop = enabled;
+    this.uniforms.u_darken_top.value = enabled ? 1 : 0;
+  }
+
+  renderFrame(time) {
+    this.uniforms.u_time.value = time;
+    this.minigl.render();
+  }
+
+  play() {
+    if (this.playing) return;
+    this.playing = true;
+    this.rafId = requestAnimationFrame(this._animate);
+  }
+
+  pause() {
+    this.playing = false;
+    if (this.rafId) cancelAnimationFrame(this.rafId);
+  }
+
+  _animate(now) {
+    if (!this.playing) return;
+    this.time += Math.min(now - (this.last || now), 1000 / 15);
+    this.last = now;
+    this.renderFrame(this.time);
+    this.rafId = requestAnimationFrame(this._animate);
+  }
+
+  // Renders a single still frame at (width x height) * supersample, mesh
+  // density scaled the same way, then downsamples with high-quality image
+  // smoothing onto a plain 2D canvas at the target size. Supersampling +
+  // matching devicePixelRatio-independent resolution is what removes both
+  // the upscale blur and the mesh-facet banding for exported PNGs.
+  static renderStill({ width, height, colors, darkenTop, amp, seed, freqX, freqY, time, supersample = 3, meshQuality = 2 }) {
+    const renderWidth = Math.round(width * supersample);
+    const renderHeight = Math.round(height * supersample);
+
+    const offscreen = document.createElement("canvas");
+    const renderer = new GradientRenderer(offscreen, { colors, darkenTop, amp, seed, freqX, freqY });
+    renderer.init(renderWidth, renderHeight, meshQuality);
+    renderer.renderFrame(time ?? renderer.time);
+
+    const out = document.createElement("canvas");
+    out.width = width;
+    out.height = height;
+    const ctx = out.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(offscreen, 0, 0, renderWidth, renderHeight, 0, 0, width, height);
+
+    renderer.mesh.remove();
+    return out;
+  }
+}
+
+window.GradientRenderer = GradientRenderer;
